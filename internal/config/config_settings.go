@@ -32,10 +32,12 @@ func SettingsFor(requestLang string) map[string]any {
 		// Explicit selections pass through as-is; only auto is resolved.
 		// Empty means "no request in hand" and must fall back to the desktop —
 		// it cannot go through Normalize, which answers "en" for anything it
-		// does not recognise, including "".
+		// does not recognise, including "". Parse is the counterpart: a
+		// requester language we do not ship is not a request for English, so it
+		// falls through to the desktop too.
 		resolved = i18n.SystemLang()
 		if requestLang != "" {
-			if normalized := i18n.Normalize(requestLang); i18n.Supported(normalized) {
+			if normalized, ok := i18n.Parse(requestLang); ok {
 				resolved = normalized
 			}
 		}

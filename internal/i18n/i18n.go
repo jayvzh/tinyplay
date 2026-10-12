@@ -1455,26 +1455,46 @@ var messages = map[string]map[string]string{
 	},
 }
 
-func Normalize(value string) string {
+// Parse maps a language tag onto one of the shipped UI languages and reports
+// whether it matched one.
+//
+// Normalize cannot make that distinction: it answers EN for input it does not
+// recognise, and EN is itself a shipped language, so a caller cannot tell
+// "the requester asked for English" from "the requester asked for Welsh".
+// Reading the second as English is what served an English page to a phone
+// whose language we do not ship, instead of falling back to the desktop — and
+// what made an "Accept-Language: cy-GB, zh-CN" header stop at the first entry.
+// Callers that choose between candidates must use Parse; only callers that
+// must end up with some valid language may use Normalize.
+func Parse(value string) (string, bool) {
 	v := strings.ToLower(strings.ReplaceAll(value, "_", "-"))
 	switch {
 	case strings.HasPrefix(v, "zh-hant"), strings.HasPrefix(v, "zh-tw"), strings.HasPrefix(v, "zh-hk"):
-		return "zh-TW"
+		return "zh-TW", true
 	case strings.HasPrefix(v, "zh"):
-		return ZH
+		return ZH, true
 	case strings.HasPrefix(v, "ja"):
-		return "ja"
+		return "ja", true
 	case strings.HasPrefix(v, "ko"):
-		return "ko"
+		return "ko", true
 	case strings.HasPrefix(v, "es"):
-		return "es"
+		return "es", true
 	case strings.HasPrefix(v, "fr"):
-		return "fr"
+		return "fr", true
 	case strings.HasPrefix(v, "de"):
-		return "de"
+		return "de", true
+	case strings.HasPrefix(v, "en"):
+		return EN, true
 	default:
-		return EN
+		return "", false
 	}
+}
+
+func Normalize(value string) string {
+	if lang, ok := Parse(value); ok {
+		return lang
+	}
+	return EN
 }
 
 func SystemLang() string {
@@ -1500,7 +1520,7 @@ func RequestLang(r *http.Request) string {
 		return SystemLang()
 	}
 	if query := r.URL.Query().Get("lang"); query != "" {
-		if normalized := Normalize(query); isSupportedLanguage(normalized) {
+		if normalized, ok := Parse(query); ok {
 			return normalized
 		}
 	}
@@ -1509,11 +1529,13 @@ func RequestLang(r *http.Request) string {
 		return SystemLang()
 	}
 	for _, part := range strings.Split(header, ",") {
-		if normalized := Normalize(strings.TrimSpace(strings.SplitN(part, ";", 2)[0])); isSupportedLanguage(normalized) {
+		if normalized, ok := Parse(strings.TrimSpace(strings.SplitN(part, ";", 2)[0])); ok {
 			return normalized
 		}
 	}
-	return EN
+	// A language we do not ship is not a request for English: fall back to the
+	// desktop, which is what SettingsFor does for the same input.
+	return SystemLang()
 }
 
 func T(lang, key string, args ...any) string {
