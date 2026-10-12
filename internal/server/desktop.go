@@ -55,8 +55,10 @@ func (s *Server) phoneURL() string {
 // HTML/CSS/JS) over loopback with ?lang=&version=. Platform differences stay
 // in the shells only:
 //
-//   - Window chrome size: both target ~900×540 content (Windows outer height
-//     is larger by the title-bar allowance).
+//   - Window chrome size: macOS fixes the compact window at 900×540 content.
+//     Windows opens ~900×660 and then lets this page correct it through
+//     tinyplayFitContent — the compact layout is taller than 540 once the DLNA
+//     / desktop-input rows and any notice are rendered.
 //   - Native bridges (same names on both sides):
 //     tinyplaySetFullscreen      — Win Bind / mac messageHandler
 //     tinyplayIsFullscreen       — Win Bind; mac re-syncs via didFinish instead
@@ -822,7 +824,12 @@ func (s *Server) desktopPage(w http.ResponseWriter, r *http.Request) {
         standby.setAttribute('aria-hidden', standbyOn ? 'false' : 'true');
         enterBtn.setAttribute('aria-pressed', standbyOn ? 'true' : 'false');
         if (standbyOn) startStandby();
-        else stopStandby();
+        else {
+          stopStandby();
+          // Leaving the standby screen restores the compact size, whose
+          // content height may have changed (a new DLNA row, a notice, ...).
+          requestFitContent();
+        }
       };
 
       // Called by the native shell after true window full-screen changes.
@@ -1133,6 +1140,51 @@ func (s *Server) desktopPage(w http.ResponseWriter, r *http.Request) {
         if (handler) { handler.postMessage(null); return true; }
         return false;
       };
+
+      /* —— Compact window height ——
+         The shell opens the window at a fixed size, so the compact layout has
+         to tell it how much room it actually needs (tinyplayFitContent, see
+         the Windows shell). Measuring needs the fill-the-window rule relaxed
+         first: .compact is height:100%%, so its own box never grows past the
+         window however much content overflows it. */
+      let lastFitWidth = 0;
+      function requestFitContent() {
+        if (body.classList.contains('mode-standby')) return;
+        const el = document.querySelector('.compact');
+        if (!el) return;
+        const prevHeight = el.style.height;
+        const prevMin = el.style.minHeight;
+        el.style.height = 'auto';
+        el.style.minHeight = '0';
+        const height = Math.ceil(el.getBoundingClientRect().height);
+        el.style.height = prevHeight;
+        el.style.minHeight = prevMin;
+        if (height <= 0) return;
+        lastFitWidth = document.documentElement.clientWidth;
+        if (typeof window.tinyplayFitContent === 'function') {
+          // Height only. Widening is never asked for: while a scrollbar is
+          // present clientWidth is ~17px short, so asking for that width would
+          // narrow the window, wrap the text into more lines, and make the page
+          // taller — the two would chase each other until the window collapsed.
+          window.tinyplayFitContent(height, window.innerHeight);
+          return;
+        }
+        const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.tinyplayFitContent;
+        if (handler) {
+          handler.postMessage({ height, innerHeight: window.innerHeight });
+        }
+      }
+      requestFitContent();
+      // Again once the QR image and any webfont have a layout box: the first
+      // pass can run before either contributes height.
+      window.addEventListener('load', requestFitContent);
+      // Width only. Re-fitting on a height change would fight the user while
+      // they drag the window shorter or taller.
+      if (typeof ResizeObserver === 'function') {
+        new ResizeObserver(() => {
+          if (document.documentElement.clientWidth !== lastFitWidth) requestFitContent();
+        }).observe(document.querySelector('.compact') || document.body);
+      }
       // Version label opens the native About dialog (replaces a separate About link).
       document.getElementById('btn-about')?.addEventListener('click', () => { nativeCall('tinyplayShowAbout'); });
 

@@ -354,11 +354,13 @@ func openWindow(url string) {
 		WindowOptions: webview2.WindowOptions{
 			Title: "TinyPlay",
 			// Outer window size, not the WebView's content area — the title
-			// bar eats a slice of the height (see desktop.go's compact-page
-			// comment). 900x540 is the content area the compact page's CSS
-			// targets; the +36 below is a rough allowance for that title bar.
+			// bar eats a slice of the height. 900 keeps the compact page's
+			// two-column layout (its CSS stacks below 760). The height is only
+			// a first-paint estimate: the compact content is taller than 540
+			// once the DLNA/input rows and notices are in, so the page measures
+			// itself and calls tinyplayFitContent, which corrects it here.
 			Width:  900,
-			Height: 576,
+			Height: 700,
 			Center: true,
 			// Resource ID of the icon embedded by rsrc (see
 			// .github/workflows/*.yml: `rsrc -ico assets/icon.ico -manifest
@@ -428,6 +430,18 @@ func openWindow(url string) {
 	})
 	_ = w.Bind("tinyplayShowAbout", func() error {
 		showAbout()
+		return nil
+	})
+	// The compact page outgrows the window it is opened in (see the page's
+	// requestFitContent), so let it ask for the content size it needs instead
+	// of guessing one here: the exact height depends on which aux rows and
+	// notices the core rendered, and on the UI language's line wrapping.
+	_ = w.Bind("tinyplayFitContent", func(cssH, innerH float64) error {
+		if fs.active {
+			// Standby covers the whole monitor; resizing would break out of it.
+			return nil
+		}
+		fitWindowContent(uintptr(w.Window()), cssH, innerH)
 		return nil
 	})
 
@@ -505,6 +519,68 @@ func (fs *winFullscreen) exit(hwnd uintptr) {
 	fs.active = false
 }
 
+// fitWindowContent resizes a shell window so that its content area is cssH CSS
+// pixels tall. The width is left alone on purpose — see requestFitContent in
+// internal/server/desktop.go.
+//
+// The page sends its current window.innerHeight alongside the height it asks
+// for, and that is what keeps this DPI-safe: WebView2 lays out in CSS pixels
+// while every Win32 rect here is in device pixels, so the ratio between the two
+// is measured rather than assumed (a hard-coded 1.0 would make the window far
+// too tall on a scaled display).
+//
+// The result is clamped to the monitor's work area, and the window chrome is
+// measured rather than estimated: removeMinimizeButton and the standby
+// fullscreen both alter the window style, so any fixed allowance drifts.
+func fitWindowContent(hwnd uintptr, cssH, innerH float64) {
+	if hwnd == 0 || cssH <= 0 || innerH <= 0 {
+		return
+	}
+	var client, outer winRect
+	if ok, _, _ := procGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&client))); ok == 0 {
+		return
+	}
+	if ok, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&outer))); ok == 0 {
+		return
+	}
+	clientW := float64(client.Right - client.Left)
+	clientH := float64(client.Bottom - client.Top)
+	if clientW <= 0 || clientH <= 0 {
+		return
+	}
+	wantH := cssH * (clientH / innerH)
+	if wantH <= 0 {
+		return
+	}
+
+	var mi winMonitorInfo
+	haveMonitor := false
+	if mon, _, _ := procMonitorFromWindow.Call(hwnd, monitorDefaultToNearest); mon != 0 {
+		mi.Size = uint32(unsafe.Sizeof(mi))
+		if ok, _, _ := procGetMonitorInfoW.Call(mon, uintptr(unsafe.Pointer(&mi))); ok != 0 {
+			haveMonitor = true
+			if workH := float64(mi.Work.Bottom - mi.Work.Top); workH > 0 && wantH > workH {
+				wantH = workH
+			}
+		}
+	}
+
+	// Width stays as it is: the page never asks for one (see requestFitContent).
+	outerW := float64(outer.Right - outer.Left)
+	outerH := float64(outer.Bottom - outer.Top)
+	newH := int32(wantH + (outerH - clientH))
+	// Grow/shrink around the vertical centre, then nudge back inside the work
+	// area: a window whose top edge slides under the taskbar is worse than a
+	// slightly off-centre one.
+	top := outer.Top + (int32(outerH)-newH)/2
+	if haveMonitor && top < mi.Work.Top {
+		top = mi.Work.Top
+	}
+	_, _, _ = procSetWindowPos.Call(hwnd, 0,
+		uintptr(outer.Left), uintptr(top), uintptr(int32(outerW)), uintptr(newH),
+		uintptr(swpNoZOrder|swpNoActivate|swpShowWindow))
+}
+
 // webview2DownloadURL is Microsoft's official evergreen bootstrapper for the
 // WebView2 Runtime; it always redirects to the latest installer.
 const webview2DownloadURL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
@@ -529,6 +605,7 @@ var (
 	procSetWindowLongPtrW        = user32.NewProc("SetWindowLongPtrW")
 	procSetWindowPos             = user32.NewProc("SetWindowPos")
 	procGetWindowRect            = user32.NewProc("GetWindowRect")
+	procGetClientRect            = user32.NewProc("GetClientRect")
 	procMonitorFromWindow        = user32.NewProc("MonitorFromWindow")
 	procGetMonitorInfoW          = user32.NewProc("GetMonitorInfoW")
 	procShowWindow               = user32.NewProc("ShowWindow")

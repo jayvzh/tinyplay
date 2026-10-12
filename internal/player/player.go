@@ -1589,6 +1589,12 @@ func (p *Player) Play(url string, opt PlayOptions) map[string]any {
 			// is available and leaves the "current" default otherwise.
 			args = append(args, hint)
 		}
+		// Key bindings for this process only — see inputconf.go. Skipped
+		// silently if the file cannot be written: losing the shortcuts is
+		// better than an mpv that refuses to start over a bad --input-conf.
+		if conf, ok := ensureMPVInputConf(); ok {
+			args = append(args, "--input-conf="+conf)
+		}
 		switch playbackCacheModeFor(opt.SourceType) {
 		case cacheOnDemand:
 			args = append(args, cacheArgs()...)
